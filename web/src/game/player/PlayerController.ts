@@ -57,6 +57,15 @@ export class PlayerController implements IFollowable {
     private readonly cameraUpdateIntervalMs: number = 33; // ~30 FPS
     private lastFreeCameraUpdateTime: number = 0;
     private readonly freeCameraUpdateIntervalMs: number = 33; // ~30 FPS
+    // Cinematic chase camera state
+    private lastChaseLng: number | null = null;
+    private lastChaseLat: number | null = null;
+    private lastChaseElevation: number | null = null;
+    private lastLookAtLng: number | null = null;
+    private lastLookAtLat: number | null = null;
+    private lastCinematicUpdateTime: number = 0;
+    private readonly cinematicUpdateIntervalMs: number = 33; // ~30 FPS
+    private readonly cinematicSmoothing: number = 0.15; // exponential smoothing factor
     private ui: PlayerUI | null = null;
     private keyStates: Record<string, boolean> = {
         w: false,    // Forward
@@ -274,7 +283,10 @@ export class PlayerController implements IFollowable {
                         this.lastFreeCameraUpdateTime = currentTime;
                     }
                 } else {
-                    if ((currentTime - this.lastCameraUpdateTime) >= this.cameraUpdateIntervalMs) {
+                    // Cinematic chase camera for car state using Mapbox free camera
+                    if (this.currentState instanceof CarState) {
+                        this.updateCinematicChaseCamera(currentTime);
+                    } else if ((currentTime - this.lastCameraUpdateTime) >= this.cameraUpdateIntervalMs) {
                         const zoom = ZoomController.getZoom();
                         const desiredBearing = -this._rotation.z + BearingController.getBearing();
                         const desiredPitch = PitchController.getPitch();
@@ -318,6 +330,86 @@ export class PlayerController implements IFollowable {
             }
         };
         animate();
+    }
+
+    private updateCinematicChaseCamera(currentTime: number): void {
+        if ((currentTime - this.lastCinematicUpdateTime) < this.cinematicUpdateIntervalMs) {
+            return;
+        }
+
+        const map = CameraController.getMap();
+        const speedKmh = PlayerStore.getCurrentSpeed();
+        const speedNorm = Math.max(0, Math.min(1, speedKmh / 120));
+
+        const playerLng = this._coordinates[0];
+        const playerLat = this._coordinates[1];
+        const groundElevation = this._elevation; // meters
+
+        // Heading: player facing direction
+        const bearingDegrees = (-this._rotation.z + 360) % 360;
+        const bearingRad = (bearingDegrees * Math.PI) / 180;
+
+        // Distance behind player (degrees) scaled by speed and zoom
+        const baseDistance = 0.0006; // degrees at mid-latitude
+        const distance = baseDistance + speedNorm * 0.0016;
+
+        // Look-ahead distance for target point (degrees)
+        const baseLookAhead = 0.0004;
+        const lookAhead = baseLookAhead + speedNorm * 0.0012;
+
+        // Lateral offset based on turning rate to create banking feel
+        const desiredBearing = -this._rotation.z + BearingController.getBearing();
+        let yawDelta = desiredBearing - this.lastBearing;
+        while (yawDelta > 180) yawDelta -= 360;
+        while (yawDelta < -180) yawDelta += 360;
+        const sideFactor = Math.max(-1, Math.min(1, yawDelta / 45));
+        const sideOffset = sideFactor * 0.00035; // degrees
+
+        // Compute chase camera target (behind and slightly to the side)
+        const behindBearingRad = ((bearingDegrees + 180) * Math.PI) / 180;
+        const chaseLngTarget = playerLng + Math.sin(behindBearingRad) * distance + Math.cos(bearingRad) * sideOffset;
+        const chaseLatTarget = playerLat + Math.cos(behindBearingRad) * distance - Math.sin(bearingRad) * sideOffset;
+
+        // Height scales with speed
+        const heightMeters = (4 + speedNorm * 10);
+        const chaseElevationTarget = groundElevation + heightMeters;
+
+        // Smooth camera position
+        if (this.lastChaseLng === null) {
+            this.lastChaseLng = chaseLngTarget;
+            this.lastChaseLat = chaseLatTarget;
+            this.lastChaseElevation = chaseElevationTarget;
+        } else {
+            this.lastChaseLng = this.lastChaseLng + (chaseLngTarget - this.lastChaseLng) * this.cinematicSmoothing;
+            this.lastChaseLat = this.lastChaseLat + (chaseLatTarget - this.lastChaseLat) * this.cinematicSmoothing;
+            this.lastChaseElevation = this.lastChaseElevation + (chaseElevationTarget - this.lastChaseElevation) * this.cinematicSmoothing;
+        }
+
+        // Compute look-at point ahead of player
+        const lookAtLngTarget = playerLng + Math.sin(bearingRad) * lookAhead;
+        const lookAtLatTarget = playerLat + Math.cos(bearingRad) * lookAhead;
+        if (this.lastLookAtLng === null) {
+            this.lastLookAtLng = lookAtLngTarget;
+            this.lastLookAtLat = lookAtLatTarget;
+        } else {
+            this.lastLookAtLng = this.lastLookAtLng + (lookAtLngTarget - this.lastLookAtLng) * this.cinematicSmoothing;
+            this.lastLookAtLat = this.lastLookAtLat + (lookAtLatTarget - this.lastLookAtLat) * this.cinematicSmoothing;
+        }
+
+        const camera = map.getFreeCameraOptions();
+        camera.position = mapboxgl.MercatorCoordinate.fromLngLat(
+            [this.lastChaseLng!, this.lastChaseLat!],
+            this.lastChaseElevation!
+        );
+        camera.lookAtPoint([this.lastLookAtLng!, this.lastLookAtLat!]);
+
+        // Dynamic pitch: lower angle at higher speeds
+        const basePitch = 55;
+        const pitch = basePitch + speedNorm * 10; // up to ~65
+        camera.setPitchBearing(pitch, bearingDegrees);
+
+        map.setFreeCameraOptions(camera);
+        this.lastCinematicUpdateTime = currentTime;
     }
 
     // Intelligent camera update for MinecraftWalkingState! 🧠
