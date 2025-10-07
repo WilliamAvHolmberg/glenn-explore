@@ -52,6 +52,11 @@ export class PlayerController implements IFollowable {
     private _elevation: number = 0;
     private animationFrameId: number | null = null;
     private lastUpdateTime: number = 0;
+    // Throttle camera updates to reduce Mapbox re-rendering load
+    private lastCameraUpdateTime: number = 0;
+    private readonly cameraUpdateIntervalMs: number = 33; // ~30 FPS
+    private lastFreeCameraUpdateTime: number = 0;
+    private readonly freeCameraUpdateIntervalMs: number = 33; // ~30 FPS
     private ui: PlayerUI | null = null;
     private keyStates: Record<string, boolean> = {
         w: false,    // Forward
@@ -231,82 +236,84 @@ export class PlayerController implements IFollowable {
                 if (this.currentState instanceof MinecraftWalkingState) {
                     this.updateMinecraftCamera();
                 } else if (PlayerStore.isPlayerFlying() && this.currentState!.verticalPosition && this.currentState!.verticalPosition > this._elevation + 5) {
-                    const camera = CameraController.getMap().getFreeCameraOptions();
+                    if ((currentTime - this.lastFreeCameraUpdateTime) >= this.freeCameraUpdateIntervalMs) {
+                        const camera = CameraController.getMap().getFreeCameraOptions();
 
-                    // Get current zoom and elevation data
-                    const zoomLevel = ZoomController.getZoom();
-                    const elevationDifference = this.currentState!.verticalPosition - this._elevation;
+                        // Get current zoom and elevation data
+                        const zoomLevel = ZoomController.getZoom();
+                        const elevationDifference = this.currentState!.verticalPosition - this._elevation;
 
-                    // Convert rotation to bearing (0 = north, clockwise)
-                    // Mapbox uses 0 = north, clockwise positive
-                    // We need to handle the conversion carefully
-                    const bearingDegrees = (-this._rotation.z + 360) % 360;
+                        // Convert rotation to bearing (0 = north, clockwise)
+                        const bearingDegrees = (-this._rotation.z + 360) % 360;
 
-                    // For camera behind the car, we need to offset bearing by 180 degrees
-                    const cameraBearingDegrees = (bearingDegrees + 180) % 360;
-                    const cameraBearingRadians = (cameraBearingDegrees * Math.PI) / 180;
+                        // For camera behind the car, we need to offset bearing by 180 degrees
+                        const cameraBearingDegrees = (bearingDegrees + 180) % 360;
+                        const cameraBearingRadians = (cameraBearingDegrees * Math.PI) / 180;
 
-                    // Distance increases with elevation and zoom level
-                    const baseDistance = 0.0015;
-                    const elevationFactor = 1 + (elevationDifference / 200);
-                    const zoomFactor = Math.pow(0.75, (zoomLevel - 14));
-                    const distance = baseDistance * elevationFactor * zoomFactor;
+                        // Distance increases with elevation and zoom level
+                        const baseDistance = 0.0015;
+                        const elevationFactor = 1 + (elevationDifference / 200);
+                        const zoomFactor = Math.pow(0.75, (zoomLevel - 14));
+                        const distance = baseDistance * elevationFactor * zoomFactor;
 
-                    // Use standard cartographic formula for offset calculation
-                    // We use sin for longitude and cos for latitude when calculating from bearing
-                    const offsetLng = this._coordinates[0] + Math.sin(cameraBearingRadians) * distance;
-                    const offsetLat = this._coordinates[1] + Math.cos(cameraBearingRadians) * distance;
+                        // Offset from player position
+                        const offsetLng = this._coordinates[0] + Math.sin(cameraBearingRadians) * distance;
+                        const offsetLat = this._coordinates[1] + Math.cos(cameraBearingRadians) * distance;
 
-                    // Set camera elevation - slightly above vehicle for better visibility
-                    const cameraElevation = this.currentState!.verticalPosition + (zoomLevel * 0.3);
+                        // Slightly above vehicle for better visibility
+                        const cameraElevation = this.currentState!.verticalPosition + (zoomLevel * 0.3);
 
-                    // Position camera at calculated position
-                    camera.position = mapboxgl.MercatorCoordinate.fromLngLat(
-                        [offsetLng, offsetLat],
-                        cameraElevation
-                    );
+                        camera.position = mapboxgl.MercatorCoordinate.fromLngLat(
+                            [offsetLng, offsetLat],
+                            cameraElevation
+                        );
+                        camera.lookAtPoint([this._coordinates[0], this._coordinates[1]]);
+                        camera.setPitchBearing(PitchController.getPitch(), bearingDegrees);
 
-                    // Look directly at the player's position
-                    camera.lookAtPoint([this._coordinates[0], this._coordinates[1]]);
-
-                    // Set the camera orientation
-                    // Use original bearing for camera direction, not offset bearing
-                    camera.setPitchBearing(PitchController.getPitch(), bearingDegrees);
-
-                    CameraController.getMap().setFreeCameraOptions(camera);
+                        CameraController.getMap().setFreeCameraOptions(camera);
+                        this.lastFreeCameraUpdateTime = currentTime;
+                    }
                 } else {
-                    const zoom = ZoomController.getZoom();
-                    const bearing = -this._rotation.z + BearingController.getBearing();
-                    const pitch = PitchController.getPitch();
-                    const lng = this._coordinates[0];
-                    const lat = this._coordinates[1];
-                    if (lng !== this.lastLng || lat !== this.lastLat) {
-                        CameraController.getMap().setCenter([lng, lat]);
-                        this.lastLng = lng;
-                        this.lastLat = lat;
-                    }
-                    if (pitch !== this.lastPitch) {
-                        CameraController.getMap().setPitch(pitch);
-                        this.lastPitch = pitch;
-                    }
+                    if ((currentTime - this.lastCameraUpdateTime) >= this.cameraUpdateIntervalMs) {
+                        const zoom = ZoomController.getZoom();
+                        const desiredBearing = -this._rotation.z + BearingController.getBearing();
+                        const desiredPitch = PitchController.getPitch();
+                        const desiredLng = this._coordinates[0];
+                        const desiredLat = this._coordinates[1];
 
-                    if (bearing !== this.lastBearing || pitch !== this.lastPitch) {
-                        CameraController.getMap().setBearing(bearing);
-                        this.lastBearing = bearing;
-                    }
+                        // Thresholds to avoid micro updates
+                        const bearingChanged = Math.abs(desiredBearing - this.lastBearing) > 0.5;
+                        const pitchChanged = Math.abs(desiredPitch - this.lastPitch) > 0.5;
+                        const centerChanged = (desiredLng !== this.lastLng) || (desiredLat !== this.lastLat);
+                        const zoomChanged = Math.abs(zoom - this.lastZoom) > 0.01;
 
-                    if (CameraController.getMap().getZoom() !== zoom) {
-                        CameraController.getMap().setZoom(zoom);
-                        this.lastZoom = zoom;
-                    }
+                        const updates: any = {};
+                        if (centerChanged) {
+                            updates.center = [desiredLng, desiredLat];
+                            this.lastLng = desiredLng;
+                            this.lastLat = desiredLat;
+                        }
+                        if (bearingChanged) {
+                            updates.bearing = desiredBearing;
+                            this.lastBearing = desiredBearing;
+                        }
+                        if (pitchChanged) {
+                            updates.pitch = desiredPitch;
+                            this.lastPitch = desiredPitch;
+                        }
+                        if (zoomChanged) {
+                            updates.zoom = zoom;
+                            this.lastZoom = zoom;
+                        }
 
-                    // CameraController.getMap().jumpTo({
-                    //     center: [this._coordinates[0], this._coordinates[1]],
-                    //     bearing: -this._rotation.z + ZoomController.getZoom(),
-                    //     pitch: PitchController.getPitch(),
-                    //     //...(PlayerStore.getLockZoom() || !this.hasSetZoom ? { zoom: 20 } : {})
-                    // });
-                    this.hasSetZoom = true;
+                        if (Object.keys(updates).length > 0) {
+                            // Batch camera changes in one call
+                            CameraController.getMap().jumpTo(updates as any);
+                            this.hasSetZoom = true;
+                        }
+
+                        this.lastCameraUpdateTime = currentTime;
+                    }
                 }
             }
         };
@@ -353,15 +360,14 @@ export class PlayerController implements IFollowable {
             const zoomDiff = Math.abs(zoom - this.lastZoom);
             
             // Smooth camera movement when Bob walks around
-            if (positionDiff > 0.00111 || zoomDiff > 0.5) {
-                CameraController.getMap().easeTo({
+            if (positionDiff > 0.00111 || zoomDiff > 0.25) {
+                // Batch changes to avoid repeated re-render phases
+                CameraController.getMap().jumpTo({
                     center: [lng, lat],
                     zoom: zoom,
-                    duration: 600, // Smooth but responsive
-                    essential: true,
                     pitch: pitch,
                     bearing: bearing
-                });
+                } as any);
                 
                 this.lastLng = lng;
                 this.lastLat = lat;

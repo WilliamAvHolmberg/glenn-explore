@@ -251,6 +251,7 @@ export class RemotePlayer {
             this.lastAnimationTime = time;
 
             this.mixer.update(delta);
+            // Let Mapbox render loop drive view; throttle animation updates slightly
             this.animationFrameId = requestAnimationFrame(animate);
         };
 
@@ -317,7 +318,7 @@ export class RemotePlayer {
 
     public updatePosition(coordinates: [number, number, number], rotation: { x: number, y: number, z: number }): void {
         this.lastUpdateTime = Date.now();
-        console.log(this.modelType)
+        // console.log(this.modelType)
         this.data.position = {
             coordinates,
             rotation,
@@ -346,7 +347,7 @@ export class RemotePlayer {
 
         this.data.state = state;
 
-        console.log(this.model)
+        // console.log(this.model)
 
         // Handle model change
         if (modelChanged) {

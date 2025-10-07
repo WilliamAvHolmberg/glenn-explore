@@ -34,15 +34,14 @@ export class MinimapController {
   }
 
   private startAutoUpdates(): void {
+    // Reduce minimap update frequency to ease main thread load
+    const UPDATE_INTERVAL_MS = 250; // 4x per second is enough
     this.updateInterval = window.setInterval(() => {
-
       this.updateVehicleState();
       //if (!this.dependencies.vehiclesController) return;
-
       //const players = this.dependencies.vehiclesController.getAllPlayers();
       //this.updateOtherVehicles(players);
-
-    }, 100);
+    }, UPDATE_INTERVAL_MS);
   }
 
   private updateOtherVehicles(players: Array<{
