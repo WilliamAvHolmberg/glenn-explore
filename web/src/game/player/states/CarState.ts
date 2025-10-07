@@ -80,6 +80,11 @@ export class CarState implements PlayerState<CarModelConfig> {
         // Cap deltaTime to prevent physics explosion on slow frames
         deltaTime = Math.min(deltaTime, this.MAX_DELTA_TIME);
 
+        // Update animation mixer with deltaTime for smooth animations
+        if (this.mixer) {
+            this.mixer.update(deltaTime);
+        }
+
         // Add to accumulator
         this.timeAccumulator += deltaTime;
 

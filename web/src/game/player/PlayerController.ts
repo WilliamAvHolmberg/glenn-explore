@@ -70,6 +70,10 @@ export class PlayerController implements IFollowable {
     private lastLng: number = 0;
     private lastLat: number = 0;
     
+    // Camera update throttling for performance optimization 🎥
+    private lastCameraUpdate: number = 0;
+    private readonly CAMERA_UPDATE_INTERVAL = 33; // ~30 FPS (33ms between updates)
+    
     // MinecraftWalking camera throttling for better performance 🎥
     private lastMinecraftCameraUpdate: number = 0;
     private minecraftCameraInterval: number = 1000; // Update every 1 second for Bob!
@@ -220,97 +224,109 @@ export class PlayerController implements IFollowable {
 
     private startUpdateLoop(): void {
         this.lastUpdateTime = performance.now();
+        this.lastCameraUpdate = performance.now();
+        
         const animate = () => {
             const currentTime = performance.now();
             const deltaTime = currentTime - this.lastUpdateTime;
             this.lastUpdateTime = currentTime;
+            
+            // Always update game state at 60 FPS
             this.update();
-            this.animationFrameId = requestAnimationFrame(animate);
-            if (PlayerStore.isFollowingCar()) {
-                // Special handling for MinecraftWalkingState - relaxed camera! 🎮
-                if (this.currentState instanceof MinecraftWalkingState) {
-                    this.updateMinecraftCamera();
-                } else if (PlayerStore.isPlayerFlying() && this.currentState!.verticalPosition && this.currentState!.verticalPosition > this._elevation + 5) {
-                    const camera = CameraController.getMap().getFreeCameraOptions();
-
-                    // Get current zoom and elevation data
-                    const zoomLevel = ZoomController.getZoom();
-                    const elevationDifference = this.currentState!.verticalPosition - this._elevation;
-
-                    // Convert rotation to bearing (0 = north, clockwise)
-                    // Mapbox uses 0 = north, clockwise positive
-                    // We need to handle the conversion carefully
-                    const bearingDegrees = (-this._rotation.z + 360) % 360;
-
-                    // For camera behind the car, we need to offset bearing by 180 degrees
-                    const cameraBearingDegrees = (bearingDegrees + 180) % 360;
-                    const cameraBearingRadians = (cameraBearingDegrees * Math.PI) / 180;
-
-                    // Distance increases with elevation and zoom level
-                    const baseDistance = 0.0015;
-                    const elevationFactor = 1 + (elevationDifference / 200);
-                    const zoomFactor = Math.pow(0.75, (zoomLevel - 14));
-                    const distance = baseDistance * elevationFactor * zoomFactor;
-
-                    // Use standard cartographic formula for offset calculation
-                    // We use sin for longitude and cos for latitude when calculating from bearing
-                    const offsetLng = this._coordinates[0] + Math.sin(cameraBearingRadians) * distance;
-                    const offsetLat = this._coordinates[1] + Math.cos(cameraBearingRadians) * distance;
-
-                    // Set camera elevation - slightly above vehicle for better visibility
-                    const cameraElevation = this.currentState!.verticalPosition + (zoomLevel * 0.3);
-
-                    // Position camera at calculated position
-                    camera.position = mapboxgl.MercatorCoordinate.fromLngLat(
-                        [offsetLng, offsetLat],
-                        cameraElevation
-                    );
-
-                    // Look directly at the player's position
-                    camera.lookAtPoint([this._coordinates[0], this._coordinates[1]]);
-
-                    // Set the camera orientation
-                    // Use original bearing for camera direction, not offset bearing
-                    camera.setPitchBearing(PitchController.getPitch(), bearingDegrees);
-
-                    CameraController.getMap().setFreeCameraOptions(camera);
-                } else {
-                    const zoom = ZoomController.getZoom();
-                    const bearing = -this._rotation.z + BearingController.getBearing();
-                    const pitch = PitchController.getPitch();
-                    const lng = this._coordinates[0];
-                    const lat = this._coordinates[1];
-                    if (lng !== this.lastLng || lat !== this.lastLat) {
-                        CameraController.getMap().setCenter([lng, lat]);
-                        this.lastLng = lng;
-                        this.lastLat = lat;
-                    }
-                    if (pitch !== this.lastPitch) {
-                        CameraController.getMap().setPitch(pitch);
-                        this.lastPitch = pitch;
-                    }
-
-                    if (bearing !== this.lastBearing || pitch !== this.lastPitch) {
-                        CameraController.getMap().setBearing(bearing);
-                        this.lastBearing = bearing;
-                    }
-
-                    if (CameraController.getMap().getZoom() !== zoom) {
-                        CameraController.getMap().setZoom(zoom);
-                        this.lastZoom = zoom;
-                    }
-
-                    // CameraController.getMap().jumpTo({
-                    //     center: [this._coordinates[0], this._coordinates[1]],
-                    //     bearing: -this._rotation.z + ZoomController.getZoom(),
-                    //     pitch: PitchController.getPitch(),
-                    //     //...(PlayerStore.getLockZoom() || !this.hasSetZoom ? { zoom: 20 } : {})
-                    // });
-                    this.hasSetZoom = true;
-                }
+            
+            // Throttle camera updates to ~30 FPS for better performance
+            if (PlayerStore.isFollowingCar() && (currentTime - this.lastCameraUpdate) >= this.CAMERA_UPDATE_INTERVAL) {
+                this.updateCamera();
+                this.lastCameraUpdate = currentTime;
             }
+            
+            this.animationFrameId = requestAnimationFrame(animate);
         };
         animate();
+    }
+    
+    /**
+     * Update camera position - throttled to ~30 FPS
+     * Uses batched API calls for optimal performance
+     */
+    private updateCamera(): void {
+        // Special handling for MinecraftWalkingState - relaxed camera! 🎮
+        if (this.currentState instanceof MinecraftWalkingState) {
+            this.updateMinecraftCamera();
+            return;
+        }
+        
+        // Flying mode camera handling
+        if (PlayerStore.isPlayerFlying() && this.currentState!.verticalPosition && this.currentState!.verticalPosition > this._elevation + 5) {
+            const camera = CameraController.getMap().getFreeCameraOptions();
+
+            // Get current zoom and elevation data
+            const zoomLevel = ZoomController.getZoom();
+            const elevationDifference = this.currentState!.verticalPosition - this._elevation;
+
+            // Convert rotation to bearing (0 = north, clockwise)
+            const bearingDegrees = (-this._rotation.z + 360) % 360;
+            const cameraBearingDegrees = (bearingDegrees + 180) % 360;
+            const cameraBearingRadians = (cameraBearingDegrees * Math.PI) / 180;
+
+            // Distance increases with elevation and zoom level
+            const baseDistance = 0.0015;
+            const elevationFactor = 1 + (elevationDifference / 200);
+            const zoomFactor = Math.pow(0.75, (zoomLevel - 14));
+            const distance = baseDistance * elevationFactor * zoomFactor;
+
+            // Calculate camera position
+            const offsetLng = this._coordinates[0] + Math.sin(cameraBearingRadians) * distance;
+            const offsetLat = this._coordinates[1] + Math.cos(cameraBearingRadians) * distance;
+            const cameraElevation = this.currentState!.verticalPosition + (zoomLevel * 0.3);
+
+            // Position camera at calculated position
+            camera.position = mapboxgl.MercatorCoordinate.fromLngLat(
+                [offsetLng, offsetLat],
+                cameraElevation
+            );
+
+            // Look directly at the player's position
+            camera.lookAtPoint([this._coordinates[0], this._coordinates[1]]);
+            camera.setPitchBearing(PitchController.getPitch(), bearingDegrees);
+
+            CameraController.getMap().setFreeCameraOptions(camera);
+            return;
+        }
+        
+        // Normal follow mode - use batched camera update
+        const zoom = ZoomController.getZoom();
+        const bearing = -this._rotation.z + BearingController.getBearing();
+        const pitch = PitchController.getPitch();
+        const lng = this._coordinates[0];
+        const lat = this._coordinates[1];
+        
+        // Check if any values have changed significantly (avoid unnecessary updates)
+        const lngChanged = Math.abs(lng - this.lastLng) > 0.0000001;
+        const latChanged = Math.abs(lat - this.lastLat) > 0.0000001;
+        const bearingChanged = Math.abs(bearing - this.lastBearing) > 0.01;
+        const pitchChanged = Math.abs(pitch - this.lastPitch) > 0.01;
+        const zoomChanged = Math.abs(zoom - this.lastZoom) > 0.01;
+        
+        // Only update if something actually changed
+        if (lngChanged || latChanged || bearingChanged || pitchChanged || zoomChanged) {
+            // PERFORMANCE OPTIMIZATION: Use single jumpTo() call instead of 4 separate API calls
+            // This reduces Mapbox re-renders from ~240/sec to ~30/sec!
+            CameraController.getMap().jumpTo({
+                center: [lng, lat],
+                bearing: bearing,
+                pitch: pitch,
+                zoom: zoom
+            });
+            
+            // Update cached values
+            this.lastLng = lng;
+            this.lastLat = lat;
+            this.lastBearing = bearing;
+            this.lastPitch = pitch;
+            this.lastZoom = zoom;
+            this.hasSetZoom = true;
+        }
     }
 
     // Intelligent camera update for MinecraftWalkingState! 🧠
