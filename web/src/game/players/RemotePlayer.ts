@@ -240,17 +240,28 @@ export class RemotePlayer {
 
     private startAnimationLoop(): void {
         if (this.animationFrameId) return;
+        
+        // PERFORMANCE: Throttle animation updates to ~30 FPS for remote players
+        const ANIMATION_UPDATE_INTERVAL = 33; // ~30 FPS
+        let lastUpdate = 0;
+        
         const animate = (time: number) => {
             if (!this.mixer) return;
 
             if (this.lastAnimationTime === 0) {
                 this.lastAnimationTime = time;
+                lastUpdate = time;
             }
 
-            const delta = (time - this.lastAnimationTime) * 0.001;
-            this.lastAnimationTime = time;
+            // Only update every ~33ms (30 FPS) instead of every frame (60 FPS)
+            if (time - lastUpdate >= ANIMATION_UPDATE_INTERVAL) {
+                const delta = (time - this.lastAnimationTime) * 0.001;
+                this.lastAnimationTime = time;
+                lastUpdate = time;
 
-            this.mixer.update(delta);
+                this.mixer.update(delta);
+            }
+            
             this.animationFrameId = requestAnimationFrame(animate);
         };
 
@@ -261,22 +272,31 @@ export class RemotePlayer {
     private startMinecraftAnimationLoop(): void {
         if (this.animationFrameId) return;
         
+        // PERFORMANCE: Throttle minecraft animation updates to ~30 FPS
+        const ANIMATION_UPDATE_INTERVAL = 33; // ~30 FPS
+        let lastUpdate = 0;
+        
         const animate = (time: number) => {
             if (!this.characterGroup) return;
 
             if (this.lastAnimationTime === 0) {
                 this.lastAnimationTime = time;
+                lastUpdate = time;
             }
 
-            const deltaTime = (time - this.lastAnimationTime) * 0.001;
-            this.lastAnimationTime = time;
+            // Only update every ~33ms (30 FPS) instead of every frame (60 FPS)
+            if (time - lastUpdate >= ANIMATION_UPDATE_INTERVAL) {
+                const deltaTime = (time - this.lastAnimationTime) * 0.001;
+                this.lastAnimationTime = time;
+                lastUpdate = time;
 
-            // Animate based on animation state
-            if (this.animationState === 'walk' || this.animationState === 'running') {
-                this.walkCycle += deltaTime * (this.animationState === 'running' ? 8 : 4);
-                this.animateMinecraftWalking();
-            } else {
-                this.resetMinecraftPose();
+                // Animate based on animation state
+                if (this.animationState === 'walk' || this.animationState === 'running') {
+                    this.walkCycle += deltaTime * (this.animationState === 'running' ? 8 : 4);
+                    this.animateMinecraftWalking();
+                } else {
+                    this.resetMinecraftPose();
+                }
             }
 
             this.animationFrameId = requestAnimationFrame(animate);
